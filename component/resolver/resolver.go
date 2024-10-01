@@ -12,8 +12,8 @@ import (
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/trie"
 
+	"github.com/metacubex/randv2"
 	"github.com/miekg/dns"
-	"github.com/zhangyunhao116/fastrand"
 )
 
 var (
@@ -46,6 +46,8 @@ type Resolver interface {
 	LookupIPv6(ctx context.Context, host string) (ips []netip.Addr, err error)
 	ExchangeContext(ctx context.Context, m *dns.Msg) (msg *dns.Msg, err error)
 	Invalid() bool
+	ClearCache()
+	ResetConnection()
 }
 
 // LookupIPv4WithResolver same as LookupIPv4, but with a resolver
@@ -93,7 +95,7 @@ func ResolveIPv4WithResolver(ctx context.Context, host string, r Resolver) (neti
 	} else if len(ips) == 0 {
 		return netip.Addr{}, fmt.Errorf("%w: %s", ErrIPNotFound, host)
 	}
-	return ips[fastrand.Intn(len(ips))], nil
+	return ips[randv2.IntN(len(ips))], nil
 }
 
 // ResolveIPv4 with a host, return ipv4
@@ -149,7 +151,7 @@ func ResolveIPv6WithResolver(ctx context.Context, host string, r Resolver) (neti
 	} else if len(ips) == 0 {
 		return netip.Addr{}, fmt.Errorf("%w: %s", ErrIPNotFound, host)
 	}
-	return ips[fastrand.Intn(len(ips))], nil
+	return ips[randv2.IntN(len(ips))], nil
 }
 
 func ResolveIPv6(ctx context.Context, host string) (netip.Addr, error) {
@@ -200,9 +202,9 @@ func ResolveIPWithResolver(ctx context.Context, host string, r Resolver) (netip.
 	}
 	ipv4s, ipv6s := SortationAddr(ips)
 	if len(ipv4s) > 0 {
-		return ipv4s[fastrand.Intn(len(ipv4s))], nil
+		return ipv4s[randv2.IntN(len(ipv4s))], nil
 	}
-	return ipv6s[fastrand.Intn(len(ipv6s))], nil
+	return ipv6s[randv2.IntN(len(ipv6s))], nil
 }
 
 // ResolveIP with a host, return ip and priority return TypeA
@@ -253,6 +255,15 @@ func LookupIPProxyServerHost(ctx context.Context, host string) ([]netip.Addr, er
 		return LookupIPWithResolver(ctx, host, ProxyServerHostResolver)
 	}
 	return LookupIP(ctx, host)
+}
+
+func ResetConnection() {
+	if DefaultResolver != nil {
+		go DefaultResolver.ResetConnection()
+	}
+	if ProxyServerHostResolver != nil {
+		go ProxyServerHostResolver.ResetConnection()
+	}
 }
 
 func SortationAddr(ips []netip.Addr) (ipv4s, ipv6s []netip.Addr) {
