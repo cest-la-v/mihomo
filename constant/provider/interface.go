@@ -13,6 +13,7 @@ const (
 	File VehicleType = iota
 	HTTP
 	Compatible
+	Inline
 )
 
 // VehicleType defined
@@ -26,6 +27,8 @@ func (v VehicleType) String() string {
 		return "HTTP"
 	case Compatible:
 		return "Compatible"
+	case Inline:
+		return "Inline"
 	default:
 		return "Unknown"
 	}
@@ -88,9 +91,7 @@ type RuleProvider interface {
 	Provider
 	Behavior() RuleBehavior
 	Count() int
-	Match(*constant.Metadata) bool
-	ShouldResolveIP() bool
-	ShouldFindProcess() bool
+	Match(metadata *constant.Metadata, helper constant.RuleMatchHelper) bool
 	Strategy() any
 }
 

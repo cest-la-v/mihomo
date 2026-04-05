@@ -1,16 +1,24 @@
 package socks
 
 import (
+	"errors"
 	"io"
 	"net"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/auth"
+	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/ech"
 	C "github.com/metacubex/mihomo/constant"
 	authStore "github.com/metacubex/mihomo/listener/auth"
+	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/reality"
+	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/socks4"
 	"github.com/metacubex/mihomo/transport/socks5"
+
+	"github.com/metacubex/tls"
 )
 
 type Listener struct {
@@ -36,10 +44,10 @@ func (l *Listener) Close() error {
 }
 
 func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
-	return NewWithAuthenticator(addr, tunnel, authStore.Default, additions...)
+	return NewWithConfig(LC.AuthServer{Enable: true, Listen: addr, AuthStore: authStore.Default}, tunnel, additions...)
 }
 
-func NewWithAuthenticator(addr string, tunnel C.Tunnel, store auth.AuthStore, additions ...inbound.Addition) (*Listener, error) {
+func NewWithConfig(config LC.AuthServer, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
 	isDefault := false
 	if len(additions) == 0 {
 		isDefault = true
@@ -49,14 +57,65 @@ func NewWithAuthenticator(addr string, tunnel C.Tunnel, store auth.AuthStore, ad
 		}
 	}
 
-	l, err := inbound.Listen("tcp", addr)
+	l, err := inbound.Listen("tcp", config.Listen)
 	if err != nil {
 		return nil, err
 	}
 
+	tlsConfig := &tls.Config{Time: ntp.Now}
+	var realityBuilder *reality.Builder
+
+	if config.Certificate != "" && config.PrivateKey != "" {
+		certLoader, err := ca.NewTLSKeyPairLoader(config.Certificate, config.PrivateKey)
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return certLoader()
+		}
+
+		if config.EchKey != "" {
+			err = ech.LoadECHKey(config.EchKey, tlsConfig)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	tlsConfig.ClientAuth = ca.ClientAuthTypeFromString(config.ClientAuthType)
+	if len(config.ClientAuthCert) > 0 {
+		if tlsConfig.ClientAuth == tls.NoClientCert {
+			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		}
+	}
+	if tlsConfig.ClientAuth == tls.VerifyClientCertIfGiven || tlsConfig.ClientAuth == tls.RequireAndVerifyClientCert {
+		pool, err := ca.LoadCertificates(config.ClientAuthCert)
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig.ClientCAs = pool
+	}
+	if config.RealityConfig.PrivateKey != "" {
+		if tlsConfig.GetCertificate != nil {
+			return nil, errors.New("certificate is unavailable in reality")
+		}
+		if tlsConfig.ClientAuth != tls.NoClientCert {
+			return nil, errors.New("client-auth is unavailable in reality")
+		}
+		realityBuilder, err = config.RealityConfig.Build(tunnel)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if realityBuilder != nil {
+		l = realityBuilder.NewListener(l)
+	} else if tlsConfig.GetCertificate != nil {
+		l = tls.NewListener(l, tlsConfig)
+	}
+
 	sl := &Listener{
 		listener: l,
-		addr:     addr,
+		addr:     config.Listen,
 	}
 	go func() {
 		for {
@@ -67,7 +126,7 @@ func NewWithAuthenticator(addr string, tunnel C.Tunnel, store auth.AuthStore, ad
 				}
 				continue
 			}
-			store := store
+			store := config.AuthStore
 			if isDefault || store == authStore.Default { // only apply on default listener
 				if !inbound.IsRemoteAddrDisAllowed(c.RemoteAddr()) {
 					_ = c.Close()

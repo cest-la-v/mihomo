@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -12,7 +11,9 @@ import (
 	"github.com/metacubex/mihomo/common/utils"
 	mihomoHttp "github.com/metacubex/mihomo/component/http"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
-	types "github.com/metacubex/mihomo/constant/provider"
+	P "github.com/metacubex/mihomo/constant/provider"
+
+	"github.com/metacubex/http"
 )
 
 const (
@@ -50,8 +51,8 @@ type FileVehicle struct {
 	path string
 }
 
-func (f *FileVehicle) Type() types.VehicleType {
-	return types.File
+func (f *FileVehicle) Type() P.VehicleType {
+	return P.File
 }
 
 func (f *FileVehicle) Path() string {
@@ -84,19 +85,22 @@ func NewFileVehicle(path string) *FileVehicle {
 }
 
 type HTTPVehicle struct {
-	url     string
-	path    string
-	proxy   string
-	header  http.Header
-	timeout time.Duration
+	url       string
+	path      string
+	proxy     string
+	header    http.Header
+	timeout   time.Duration
+	sizeLimit int64
+	inRead    func(response *http.Response)
+	provider  P.ProxyProvider
 }
 
 func (h *HTTPVehicle) Url() string {
 	return h.url
 }
 
-func (h *HTTPVehicle) Type() types.VehicleType {
-	return types.HTTP
+func (h *HTTPVehicle) Type() P.VehicleType {
+	return P.HTTP
 }
 
 func (h *HTTPVehicle) Path() string {
@@ -109,6 +113,10 @@ func (h *HTTPVehicle) Proxy() string {
 
 func (h *HTTPVehicle) Write(buf []byte) error {
 	return safeWrite(h.path, buf)
+}
+
+func (h *HTTPVehicle) SetInRead(fn func(response *http.Response)) {
+	h.inRead = fn
 }
 
 func (h *HTTPVehicle) Read(ctx context.Context, oldHash utils.HashType) (buf []byte, hash utils.HashType, err error) {
@@ -128,11 +136,16 @@ func (h *HTTPVehicle) Read(ctx context.Context, oldHash utils.HashType) (buf []b
 			setIfNoneMatch = true
 		}
 	}
-	resp, err := mihomoHttp.HttpRequestWithProxy(ctx, h.url, http.MethodGet, header, nil, h.proxy)
+	resp, err := mihomoHttp.HttpRequest(ctx, h.url, http.MethodGet, header, nil, mihomoHttp.WithSpecialProxy(h.proxy))
 	if err != nil {
 		return
 	}
 	defer resp.Body.Close()
+
+	if h.inRead != nil {
+		h.inRead(resp)
+	}
+
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		if setIfNoneMatch && resp.StatusCode == http.StatusNotModified {
 			return nil, oldHash, nil
@@ -140,7 +153,11 @@ func (h *HTTPVehicle) Read(ctx context.Context, oldHash utils.HashType) (buf []b
 		err = errors.New(resp.Status)
 		return
 	}
-	buf, err = io.ReadAll(resp.Body)
+	var reader io.Reader = resp.Body
+	if h.sizeLimit > 0 {
+		reader = io.LimitReader(reader, h.sizeLimit)
+	}
+	buf, err = io.ReadAll(reader)
 	if err != nil {
 		return
 	}
@@ -155,12 +172,13 @@ func (h *HTTPVehicle) Read(ctx context.Context, oldHash utils.HashType) (buf []b
 	return
 }
 
-func NewHTTPVehicle(url string, path string, proxy string, header http.Header, timeout time.Duration) *HTTPVehicle {
+func NewHTTPVehicle(url string, path string, proxy string, header http.Header, timeout time.Duration, sizeLimit int64) *HTTPVehicle {
 	return &HTTPVehicle{
-		url:     url,
-		path:    path,
-		proxy:   proxy,
-		header:  header,
-		timeout: timeout,
+		url:       url,
+		path:      path,
+		proxy:     proxy,
+		header:    header,
+		timeout:   timeout,
+		sizeLimit: sizeLimit,
 	}
 }

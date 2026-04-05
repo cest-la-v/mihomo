@@ -42,6 +42,11 @@ const (
 	WireGuard
 	Tuic
 	Ssh
+	Mieru
+	AnyTLS
+	Sudoku
+	Masque
+	TrustTunnel
 )
 
 const (
@@ -56,6 +61,7 @@ var ErrNotSupport = errors.New("no support")
 
 type Connection interface {
 	Chains() Chain
+	ProviderChains() Chain
 	AppendToChains(adapter ProxyAdapter)
 	RemoteDestination() string
 }
@@ -90,8 +96,7 @@ type Conn interface {
 type PacketConn interface {
 	N.EnhancePacketConn
 	Connection
-	// Deprecate WriteWithMetadata because of remote resolve DNS cause TURN failed
-	// WriteWithMetadata(p []byte, metadata *Metadata) (n int, err error)
+	ResolveUDP(ctx context.Context, metadata *Metadata) error
 }
 
 type Dialer interface {
@@ -99,49 +104,43 @@ type Dialer interface {
 	ListenPacket(ctx context.Context, network, address string, rAddrPort netip.AddrPort) (net.PacketConn, error)
 }
 
+type ProxyInfo struct {
+	XUDP         bool
+	TFO          bool
+	MPTCP        bool
+	SMUX         bool
+	Interface    string
+	RoutingMark  int
+	ProviderName string
+	DialerProxy  string
+}
+
 type ProxyAdapter interface {
 	Name() string
 	Type() AdapterType
 	Addr() string
 	SupportUDP() bool
-	SupportXUDP() bool
-	SupportTFO() bool
-	MarshalJSON() ([]byte, error)
 
-	// Deprecated: use DialContextWithDialer and ListenPacketWithDialer instead.
-	// StreamConn wraps a protocol around net.Conn with Metadata.
-	//
-	// Examples:
-	//	conn, _ := net.DialContext(context.Background(), "tcp", "host:port")
-	//	conn, _ = adapter.StreamConnContext(context.Background(), conn, metadata)
-	//
-	// It returns a C.Conn with protocol which start with
-	// a new session (if any)
-	StreamConnContext(ctx context.Context, c net.Conn, metadata *Metadata) (net.Conn, error)
+	// ProxyInfo contains some extra information maybe useful for MarshalJSON
+	ProxyInfo() ProxyInfo
+	MarshalJSON() ([]byte, error)
 
 	// DialContext return a C.Conn with protocol which
 	// contains multiplexing-related reuse logic (if any)
-	DialContext(ctx context.Context, metadata *Metadata, opts ...dialer.Option) (Conn, error)
-	ListenPacketContext(ctx context.Context, metadata *Metadata, opts ...dialer.Option) (PacketConn, error)
+	DialContext(ctx context.Context, metadata *Metadata) (Conn, error)
+	ListenPacketContext(ctx context.Context, metadata *Metadata) (PacketConn, error)
 
 	// SupportUOT return UDP over TCP support
 	SupportUOT() bool
-
-	SupportWithDialer() NetWork
-	DialContextWithDialer(ctx context.Context, dialer Dialer, metadata *Metadata) (Conn, error)
-	ListenPacketWithDialer(ctx context.Context, dialer Dialer, metadata *Metadata) (PacketConn, error)
 
 	// IsL3Protocol return ProxyAdapter working in L3 (tell dns module not pass the domain to avoid loopback)
 	IsL3Protocol(metadata *Metadata) bool
 
 	// Unwrap extracts the proxy from a proxy-group. It returns nil when nothing to extract.
 	Unwrap(metadata *Metadata, touch bool) Proxy
-}
 
-type Group interface {
-	URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (mp map[string]uint16, err error)
-	GetProxies(touch bool) []Proxy
-	Touch()
+	// Close releasing associated resources
+	Close() error
 }
 
 type DelayHistory struct {
@@ -164,12 +163,6 @@ type Proxy interface {
 	ExtraDelayHistories() map[string]ProxyState
 	LastDelayForTestUrl(url string) uint16
 	URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (uint16, error)
-
-	// Deprecated: use DialContext instead.
-	Dial(metadata *Metadata) (Conn, error)
-
-	// Deprecated: use DialPacketConn instead.
-	DialUDP(metadata *Metadata) (PacketConn, error)
 }
 
 // AdapterType is enum of adapter type
@@ -213,7 +206,18 @@ func (at AdapterType) String() string {
 		return "WireGuard"
 	case Tuic:
 		return "Tuic"
-
+	case Ssh:
+		return "Ssh"
+	case Mieru:
+		return "Mieru"
+	case AnyTLS:
+		return "AnyTLS"
+	case Sudoku:
+		return "Sudoku"
+	case Masque:
+		return "Masque"
+	case TrustTunnel:
+		return "TrustTunnel"
 	case Relay:
 		return "Relay"
 	case Selector:
@@ -224,8 +228,6 @@ func (at AdapterType) String() string {
 		return "URLTest"
 	case LoadBalance:
 		return "LoadBalance"
-	case Ssh:
-		return "Ssh"
 	default:
 		return "Unknown"
 	}
@@ -301,10 +303,15 @@ type PacketSender interface {
 	Send(PacketAdapter)
 	// Process is a blocking loop to send PacketAdapter to PacketConn and update the WriteBackProxy
 	Process(PacketConn, WriteBackProxy)
-	// ResolveUDP do a local resolve UDP dns blocking if metadata is not resolved
-	ResolveUDP(*Metadata) error
 	// Close stop the Process loop
 	Close()
+	// DoSniff will blocking after sniffer work done
+	DoSniff(*Metadata) error
+	// AddMapping add a destination NAT record
+	AddMapping(originMetadata *Metadata, metadata *Metadata)
+	// RestoreReadFrom restore destination NAT for ReadFrom
+	// the implement must ensure returned netip.Add is valid (or just return input addr)
+	RestoreReadFrom(addr netip.Addr) netip.Addr
 }
 
 type NatTable interface {
